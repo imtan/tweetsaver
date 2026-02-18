@@ -75,13 +75,21 @@ async function loadEagleFolders(selectedId) {
         if (f.id === selectedId) opt.selected = true;
         eagleFolderSelect.appendChild(opt);
       }
-      eagleStatus.innerHTML = `<span class="dot dot-ok"></span> Eagle 接続OK（${eagleFolders.length} フォルダ）`;
+      eagleStatus.innerHTML = "";
+      const dotOk = document.createElement("span");
+      dotOk.className = "dot dot-ok";
+      eagleStatus.appendChild(dotOk);
+      eagleStatus.appendChild(document.createTextNode(` Eagle 接続OK（${eagleFolders.length} フォルダ）`));
     } else {
       throw new Error("Unexpected response");
     }
   } catch (err) {
     eagleFolderSelect.innerHTML = '<option value="">Eagle に接続できません</option>';
-    eagleStatus.innerHTML = `<span class="dot dot-err"></span> ${err.message}`;
+    eagleStatus.innerHTML = "";
+    const dotErr = document.createElement("span");
+    dotErr.className = "dot dot-err";
+    eagleStatus.appendChild(dotErr);
+    eagleStatus.appendChild(document.createTextNode(` ${err.message}`));
   }
 }
 

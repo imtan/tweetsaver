@@ -136,6 +136,7 @@ async function saveToEagle(data, folderId) {
             folderId: folderId || undefined,
           }),
         });
+        if (!archiveResp.ok) throw new Error(`HTTP ${archiveResp.status}`);
         const archiveJson = await archiveResp.json();
         if (archiveJson.status === "success") savedCount++;
         else console.warn("[Tweet Saver] Eagle archive save response:", archiveJson);
@@ -159,6 +160,7 @@ async function saveToEagle(data, folderId) {
             folderId: folderId || undefined,
           }),
         });
+        if (!imgResp.ok) throw new Error(`HTTP ${imgResp.status}`);
         const imgJson = await imgResp.json();
         if (imgJson.status === "success") savedCount++;
       } catch (err) {
@@ -181,6 +183,7 @@ async function saveToEagle(data, folderId) {
             folderId: folderId || undefined,
           }),
         });
+        if (!vidResp.ok) throw new Error(`HTTP ${vidResp.status}`);
         const vidJson = await vidResp.json();
         if (vidJson.status === "success") savedCount++;
       } catch (err) {
@@ -202,6 +205,7 @@ async function saveToEagle(data, folderId) {
             folderId: folderId || undefined,
           }),
         });
+        if (!bmResp.ok) throw new Error(`HTTP ${bmResp.status}`);
         const bmJson = await bmResp.json();
         if (bmJson.status === "success") savedCount++;
       } catch (err) {

@@ -237,6 +237,7 @@ async function eagleFetch(endpoint, body) {
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
   });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return await resp.json();
 }
 
