@@ -13,8 +13,8 @@ function dataUrlToBlobUrl(dataUrl) {
   return URL.createObjectURL(blob);
 }
 
-// ── Start download and wait for completion, return absolute file path ──
-function downloadAndGetPath(url, filename) {
+// ── Start download and wait for completion ──
+function downloadAndWait(url, filename) {
   return new Promise((resolve, reject) => {
     api.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
       if (api.runtime.lastError || !downloadId) {
@@ -31,13 +31,7 @@ function downloadAndGetPath(url, filename) {
         if (delta.state && delta.state.current === "complete") {
           clearTimeout(timeout);
           api.downloads.onChanged.removeListener(listener);
-          api.downloads.search({ id: downloadId }, (results) => {
-            if (results && results[0] && results[0].filename) {
-              resolve(results[0].filename);
-            } else {
-              reject(new Error("Could not resolve download path"));
-            }
-          });
+          resolve();
         }
         if (delta.state && delta.state.current === "interrupted") {
           clearTimeout(timeout);
@@ -64,7 +58,7 @@ async function handleSave(data) {
   const settings = await api.storage.local.get(["saveMode", "eagleFolderId"]);
   const mode = settings.saveMode || "download";
 
-  // Step 1: Always download files first (collect absolute paths)
+  // Step 1: Always download files first
   const dlResult = await saveToDownloads(data);
 
   if (!dlResult.success) {
@@ -73,9 +67,9 @@ async function handleSave(data) {
 
   const results = { download: dlResult, eagle: null };
 
-  // Step 2: If Eagle mode, send downloaded files to Eagle via path
+  // Step 2: If Eagle mode, send to Eagle via addFromURL
   if (mode === "eagle" || mode === "both") {
-    results.eagle = await sendToEagle(data.tweet, dlResult.paths, settings.eagleFolderId);
+    results.eagle = await sendToEagle(data, settings.eagleFolderId);
   }
 
   const anySuccess =
@@ -91,10 +85,9 @@ async function handleSave(data) {
   return { success: true, mode, download: results.download, eagle: results.eagle };
 }
 
-// ── Download all files, return absolute paths ──
+// ── Download all files ──
 async function saveToDownloads(data) {
   const blobUrls = [];
-  const paths = { archive: null, images: [], videos: [] };
 
   try {
     const { tweet, archivePngDataUrl, imageUrls, videoUrls } = data;
@@ -105,117 +98,134 @@ async function saveToDownloads(data) {
       const blobUrl = dataUrlToBlobUrl(archivePngDataUrl);
       blobUrls.push(blobUrl);
       try {
-        paths.archive = await downloadAndGetPath(blobUrl, `${folder}/archive.png`);
+        await downloadAndWait(blobUrl, `${folder}/archive.png`);
       } catch (err) {
         console.warn("[Tweet Saver] Archive DL failed:", err);
       }
     }
 
-    // Tweet JSON (no need to send to Eagle)
+    // Tweet JSON
     const jsonStr = JSON.stringify(tweet, null, 2);
     const jsonDataUrl = "data:application/json;base64," + btoa(unescape(encodeURIComponent(jsonStr)));
     const jsonBlobUrl = dataUrlToBlobUrl(jsonDataUrl);
     blobUrls.push(jsonBlobUrl);
     try {
-      await downloadAndGetPath(jsonBlobUrl, `${folder}/tweet.json`);
+      await downloadAndWait(jsonBlobUrl, `${folder}/tweet.json`);
     } catch {}
 
     // Images
     for (let i = 0; i < (imageUrls || []).length; i++) {
       try {
         const ext = getExt(imageUrls[i]);
-        const p = await downloadAndGetPath(imageUrls[i], `${folder}/image_${i + 1}.${ext}`);
-        paths.images.push(p);
+        await downloadAndWait(imageUrls[i], `${folder}/image_${i + 1}.${ext}`);
       } catch {}
     }
 
     // Videos
     for (let i = 0; i < (videoUrls || []).length; i++) {
       try {
-        const p = await downloadAndGetPath(videoUrls[i], `${folder}/video_${i + 1}.mp4`);
-        paths.videos.push(p);
+        await downloadAndWait(videoUrls[i], `${folder}/video_${i + 1}.mp4`);
       } catch {}
     }
 
-    return { success: true, folder, paths };
+    return { success: true, folder };
   } catch (err) {
-    return { success: false, error: err.message, paths };
+    return { success: false, error: err.message };
   } finally {
     for (const u of blobUrls) URL.revokeObjectURL(u);
   }
 }
 
-// ── Send downloaded files to Eagle via addFromPaths ──
-async function sendToEagle(tweet, filePaths, folderId) {
-  const tags = ["tweet", `@${tweet.username}`];
-  if (tweet.hasVideo) tags.push("video");
-
-  const annotation = [
-    tweet.text,
-    "",
-    `— ${tweet.displayName || tweet.username} (@${tweet.username})`,
-    tweet.timestamp ? `  ${tweet.timestamp}` : "",
-    `  ${tweet.url}`,
-  ].filter(Boolean).join("\n");
-
-  const items = [];
-
-  if (filePaths.archive) {
-    items.push({
-      path: filePaths.archive,
-      name: `@${tweet.username}_${tweet.id}_archive`,
-      website: tweet.url,
-      tags: [...tags, "archive"],
-      annotation,
-    });
-  }
-
-  for (let i = 0; i < filePaths.images.length; i++) {
-    items.push({
-      path: filePaths.images[i],
-      name: `@${tweet.username}_${tweet.id}_img${i + 1}`,
-      website: tweet.url,
-      tags,
-      annotation,
-    });
-  }
-
-  for (let i = 0; i < filePaths.videos.length; i++) {
-    items.push({
-      path: filePaths.videos[i],
-      name: `@${tweet.username}_${tweet.id}_video${i + 1}`,
-      website: tweet.url,
-      tags: [...tags, "video"],
-      annotation,
-    });
-  }
-
-  // Text-only tweet: bookmark fallback
-  if (items.length === 0) {
-    try {
-      const r = await eagleFetch("/api/item/addBookmark", {
-        url: tweet.url,
-        name: `@${tweet.username}_${tweet.id}`,
-        tags, annotation, folderId: folderId || undefined,
-      });
-      return r.status === "success"
-        ? { success: true, itemCount: 1 }
-        : { success: false, error: r.message || "Bookmark failed" };
-    } catch (err) {
-      return { success: false, error: err.message };
-    }
-  }
-
-  // Send all at once
+// ── Send to Eagle via addFromURL (same approach as Chrome version) ──
+async function sendToEagle(data, folderId) {
   try {
-    const r = await eagleFetch("/api/item/addFromPaths", {
-      items,
-      folderId: folderId || undefined,
-    });
-    if (r.status === "success") {
-      return { success: true, itemCount: items.length };
+    const { tweet, archivePngBase64, imageUrls, videoUrls } = data;
+
+    const tags = ["tweet", `@${tweet.username}`];
+    if (tweet.hasVideo) tags.push("video");
+
+    const annotation = [
+      tweet.text,
+      "",
+      `— ${tweet.displayName || tweet.username} (@${tweet.username})`,
+      tweet.timestamp ? `  ${tweet.timestamp}` : "",
+      `  ${tweet.url}`,
+    ].filter(Boolean).join("\n");
+
+    let savedCount = 0;
+
+    // 1. Archive image via addFromURL with base64 data URI
+    if (archivePngBase64) {
+      try {
+        const r = await eagleFetch("/api/item/addFromURL", {
+          url: `data:image/png;base64,${archivePngBase64}`,
+          name: `@${tweet.username}_${tweet.id}_archive`,
+          website: tweet.url,
+          tags: [...tags, "archive"],
+          annotation,
+          folderId: folderId || undefined,
+        });
+        if (r.status === "success") savedCount++;
+        else console.warn("[Tweet Saver] Eagle archive save response:", r);
+      } catch (err) {
+        console.warn("[Tweet Saver] Eagle archive save failed:", err);
+      }
     }
-    return { success: false, error: r.message || "addFromPaths failed" };
+
+    // 2. Each tweet image via addFromURL
+    for (let i = 0; i < (imageUrls || []).length; i++) {
+      try {
+        const r = await eagleFetch("/api/item/addFromURL", {
+          url: imageUrls[i],
+          name: `@${tweet.username}_${tweet.id}_img${i + 1}`,
+          website: tweet.url,
+          tags,
+          annotation,
+          folderId: folderId || undefined,
+        });
+        if (r.status === "success") savedCount++;
+      } catch (err) {
+        console.warn(`[Tweet Saver] Eagle image ${i + 1} save failed:`, err);
+      }
+    }
+
+    // 3. Videos via addFromURL
+    for (let i = 0; i < (videoUrls || []).length; i++) {
+      try {
+        const r = await eagleFetch("/api/item/addFromURL", {
+          url: videoUrls[i],
+          name: `@${tweet.username}_${tweet.id}_video${i + 1}`,
+          website: tweet.url,
+          tags: [...tags, "video"],
+          annotation,
+          folderId: folderId || undefined,
+        });
+        if (r.status === "success") savedCount++;
+      } catch (err) {
+        console.warn(`[Tweet Saver] Eagle video ${i + 1} save failed:`, err);
+      }
+    }
+
+    // 4. Text-only tweet: bookmark fallback
+    if (savedCount === 0) {
+      try {
+        const r = await eagleFetch("/api/item/addBookmark", {
+          url: tweet.url,
+          name: `@${tweet.username}_${tweet.id}`,
+          tags,
+          annotation,
+          folderId: folderId || undefined,
+        });
+        if (r.status === "success") savedCount++;
+      } catch (err) {
+        console.warn("[Tweet Saver] Eagle bookmark save failed:", err);
+      }
+    }
+
+    if (savedCount > 0) {
+      return { success: true, itemCount: savedCount };
+    }
+    return { success: false, error: "Eagle API: 全アイテムの保存に失敗" };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -224,7 +234,7 @@ async function sendToEagle(tweet, filePaths, folderId) {
 async function eagleFetch(endpoint, body) {
   const resp = await fetch(EAGLE_API + endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
   });
   return await resp.json();
