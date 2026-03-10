@@ -357,6 +357,13 @@
         } else {
           line = test;
         }
+        // If a single token exceeds maxW, break it character by character
+        while (ctx.measureText(line).width > maxW && line.length > 1) {
+          let i = line.length - 1;
+          while (i > 1 && ctx.measureText(line.slice(0, i)).width > maxW) i--;
+          lines.push(line.slice(0, i));
+          line = line.slice(i);
+        }
       }
       if (line) lines.push(line);
     }
@@ -365,9 +372,17 @@
 
   function tokenize(text) {
     const tokens = [];
-    const re = /([\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFFEF\u{20000}-\u{2FA1F}]|[^\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFFEF\u{20000}-\u{2FA1F}]+)/gu;
+    const cjkRe = /([\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFFEF\u{20000}-\u{2FA1F}]|[^\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFFEF\u{20000}-\u{2FA1F}]+)/gu;
     let m;
-    while ((m = re.exec(text)) !== null) tokens.push(m[0]);
+    while ((m = cjkRe.exec(text)) !== null) {
+      const chunk = m[0];
+      // Single CJK character — keep as-is
+      if (chunk.length === 1) { tokens.push(chunk); continue; }
+      // Non-CJK run — split into words at space boundaries
+      const words = chunk.match(/\S+\s*|\s+/g);
+      if (words) tokens.push(...words);
+      else tokens.push(chunk);
+    }
     return tokens;
   }
 
