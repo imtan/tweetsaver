@@ -1,9 +1,50 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
-// Background service worker
-// Handles Downloads + Eagle API saving
 
 const EAGLE_API = "http://localhost:41595";
 
+// ── Convert data URL to Blob URL (Firefox can't download data: URLs) ──
+function dataUrlToBlobUrl(dataUrl) {
+  const parts = dataUrl.split(",");
+  const mime = parts[0].match(/:(.*?);/)[1];
+  const raw = atob(parts[1]);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  const blob = new Blob([arr], { type: mime });
+  return URL.createObjectURL(blob);
+}
+
+// ── Start download and wait for completion ──
+function downloadAndWait(url, filename) {
+  return new Promise((resolve, reject) => {
+    api.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
+      if (api.runtime.lastError || !downloadId) {
+        return reject(new Error(api.runtime.lastError?.message || "Download start failed"));
+      }
+
+      const timeout = setTimeout(() => {
+        api.downloads.onChanged.removeListener(listener);
+        reject(new Error("Download timeout"));
+      }, 60000);
+
+      function listener(delta) {
+        if (delta.id !== downloadId) return;
+        if (delta.state && delta.state.current === "complete") {
+          clearTimeout(timeout);
+          api.downloads.onChanged.removeListener(listener);
+          resolve();
+        }
+        if (delta.state && delta.state.current === "interrupted") {
+          clearTimeout(timeout);
+          api.downloads.onChanged.removeListener(listener);
+          reject(new Error("Download interrupted"));
+        }
+      }
+      api.downloads.onChanged.addListener(listener);
+    });
+  });
+}
+
+// ── Message handler ──
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "saveTweet") {
     handleSave(message.data)
@@ -14,99 +55,91 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function handleSave(data) {
-  // Load settings
   const settings = await api.storage.local.get(["saveMode", "eagleFolderId"]);
   const mode = settings.saveMode || "download";
 
-  const results = { download: null, eagle: null };
+  // Step 1: Always download files first
+  const dlResult = await saveToDownloads(data);
 
-  // Download mode
-  if (mode === "download" || mode === "both") {
-    results.download = await saveToDownloads(data);
+  if (!dlResult.success) {
+    return { success: false, error: "Download failed: " + dlResult.error };
   }
 
-  // Eagle mode
+  const results = { download: dlResult, eagle: null };
+
+  // Step 2: If Eagle mode, send to Eagle via addFromURL
   if (mode === "eagle" || mode === "both") {
-    results.eagle = await saveToEagle(data, settings.eagleFolderId);
+    results.eagle = await sendToEagle(data, settings.eagleFolderId);
   }
 
-  // Determine overall success
   const anySuccess =
-    (results.download && results.download.success) ||
-    (results.eagle && results.eagle.success);
+    results.download.success || (results.eagle && results.eagle.success);
 
   if (!anySuccess) {
     const errors = [];
-    if (results.download && !results.download.success) errors.push("DL: " + results.download.error);
+    if (!results.download.success) errors.push("DL: " + results.download.error);
     if (results.eagle && !results.eagle.success) errors.push("Eagle: " + results.eagle.error);
     return { success: false, error: errors.join("; ") };
   }
 
-  return {
-    success: true,
-    mode,
-    download: results.download,
-    eagle: results.eagle,
-  };
+  return { success: true, mode, download: results.download, eagle: results.eagle };
 }
 
-// ── Download to filesystem ──
+// ── Download all files ──
 async function saveToDownloads(data) {
+  const blobUrls = [];
+
   try {
     const { tweet, archivePngDataUrl, imageUrls, videoUrls } = data;
     const folder = `tweets/${tweet.username}_${tweet.id}`;
 
     // Archive PNG
-    await api.downloads.download({
-      url: archivePngDataUrl,
-      filename: `${folder}/archive.png`,
-      saveAs: false,
-    });
+    if (archivePngDataUrl) {
+      const blobUrl = dataUrlToBlobUrl(archivePngDataUrl);
+      blobUrls.push(blobUrl);
+      try {
+        await downloadAndWait(blobUrl, `${folder}/archive.png`);
+      } catch (err) {
+        console.warn("[Tweet Saver] Archive DL failed:", err);
+      }
+    }
 
     // Tweet JSON
     const jsonStr = JSON.stringify(tweet, null, 2);
-    const jsonUrl = "data:application/json;base64," + btoa(unescape(encodeURIComponent(jsonStr)));
-    await api.downloads.download({
-      url: jsonUrl,
-      filename: `${folder}/tweet.json`,
-      saveAs: false,
-    });
+    const jsonDataUrl = "data:application/json;base64," + btoa(unescape(encodeURIComponent(jsonStr)));
+    const jsonBlobUrl = dataUrlToBlobUrl(jsonDataUrl);
+    blobUrls.push(jsonBlobUrl);
+    try {
+      await downloadAndWait(jsonBlobUrl, `${folder}/tweet.json`);
+    } catch {}
 
-    // Individual images
-    for (let i = 0; i < imageUrls.length; i++) {
-      const ext = getExt(imageUrls[i]);
+    // Images
+    for (let i = 0; i < (imageUrls || []).length; i++) {
       try {
-        await api.downloads.download({
-          url: imageUrls[i],
-          filename: `${folder}/image_${i + 1}.${ext}`,
-          saveAs: false,
-        });
+        const ext = getExt(imageUrls[i]);
+        await downloadAndWait(imageUrls[i], `${folder}/image_${i + 1}.${ext}`);
       } catch {}
     }
 
     // Videos
-    if (videoUrls && videoUrls.length > 0) {
-      for (let i = 0; i < videoUrls.length; i++) {
-        try {
-          await api.downloads.download({
-            url: videoUrls[i],
-            filename: `${folder}/video_${i + 1}.mp4`,
-            saveAs: false,
-          });
-        } catch {}
-      }
+    for (let i = 0; i < (videoUrls || []).length; i++) {
+      try {
+        await downloadAndWait(videoUrls[i], `${folder}/video_${i + 1}.mp4`);
+      } catch {}
     }
 
     return { success: true, folder };
   } catch (err) {
     return { success: false, error: err.message };
+  } finally {
+    for (const u of blobUrls) URL.revokeObjectURL(u);
   }
 }
 
-// ── Save to Eagle ──
-async function saveToEagle(data, folderId) {
+// ── Send to Eagle via addFromURL (same approach as Chrome version) ──
+async function sendToEagle(data, folderId) {
   try {
-    const { tweet, archivePngBase64 } = data;
+    const { tweet, archivePngBase64, imageUrls, videoUrls } = data;
 
     const tags = ["tweet", `@${tweet.username}`];
     if (tweet.hasVideo) tags.push("video");
@@ -124,90 +157,66 @@ async function saveToEagle(data, folderId) {
     // 1. Archive image via addFromURL with base64 data URI
     if (archivePngBase64) {
       try {
-        const archiveResp = await fetch(`${EAGLE_API}/api/item/addFromURL`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: `data:image/png;base64,${archivePngBase64}`,
-            name: `@${tweet.username}_${tweet.id}_archive`,
-            website: tweet.url,
-            tags: [...tags, "archive"],
-            annotation,
-            folderId: folderId || undefined,
-          }),
+        const r = await eagleFetch("/api/item/addFromURL", {
+          url: `data:image/png;base64,${archivePngBase64}`,
+          name: `@${tweet.username}_${tweet.id}_archive`,
+          website: tweet.url,
+          tags: [...tags, "archive"],
+          annotation,
+          folderId: folderId || undefined,
         });
-        if (!archiveResp.ok) throw new Error(`HTTP ${archiveResp.status}`);
-        const archiveJson = await archiveResp.json();
-        if (archiveJson.status === "success") savedCount++;
-        else console.warn("[Tweet Saver] Eagle archive save response:", archiveJson);
+        if (r.status === "success") savedCount++;
+        else console.warn("[Tweet Saver] Eagle archive save response:", r);
       } catch (err) {
         console.warn("[Tweet Saver] Eagle archive save failed:", err);
       }
     }
 
-    // 2. Each tweet image via addFromURL (direct URL — Eagle downloads them)
-    for (let i = 0; i < (tweet.imageUrls || []).length; i++) {
+    // 2. Each tweet image via addFromURL
+    for (let i = 0; i < (imageUrls || []).length; i++) {
       try {
-        const imgResp = await fetch(`${EAGLE_API}/api/item/addFromURL`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: tweet.imageUrls[i],
-            name: `@${tweet.username}_${tweet.id}_img${i + 1}`,
-            website: tweet.url,
-            tags,
-            annotation,
-            folderId: folderId || undefined,
-          }),
+        const r = await eagleFetch("/api/item/addFromURL", {
+          url: imageUrls[i],
+          name: `@${tweet.username}_${tweet.id}_img${i + 1}`,
+          website: tweet.url,
+          tags,
+          annotation,
+          folderId: folderId || undefined,
         });
-        if (!imgResp.ok) throw new Error(`HTTP ${imgResp.status}`);
-        const imgJson = await imgResp.json();
-        if (imgJson.status === "success") savedCount++;
+        if (r.status === "success") savedCount++;
       } catch (err) {
         console.warn(`[Tweet Saver] Eagle image ${i + 1} save failed:`, err);
       }
     }
 
-    // 3. Videos via addFromURL (mp4 direct URL)
-    for (let i = 0; i < (tweet.videoUrls || []).length; i++) {
+    // 3. Videos via addFromURL
+    for (let i = 0; i < (videoUrls || []).length; i++) {
       try {
-        const vidResp = await fetch(`${EAGLE_API}/api/item/addFromURL`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: tweet.videoUrls[i],
-            name: `@${tweet.username}_${tweet.id}_video${i + 1}`,
-            website: tweet.url,
-            tags: [...tags, "video"],
-            annotation,
-            folderId: folderId || undefined,
-          }),
+        const r = await eagleFetch("/api/item/addFromURL", {
+          url: videoUrls[i],
+          name: `@${tweet.username}_${tweet.id}_video${i + 1}`,
+          website: tweet.url,
+          tags: [...tags, "video"],
+          annotation,
+          folderId: folderId || undefined,
         });
-        if (!vidResp.ok) throw new Error(`HTTP ${vidResp.status}`);
-        const vidJson = await vidResp.json();
-        if (vidJson.status === "success") savedCount++;
+        if (r.status === "success") savedCount++;
       } catch (err) {
         console.warn(`[Tweet Saver] Eagle video ${i + 1} save failed:`, err);
       }
     }
 
-    // 4. If text-only tweet (no images, no video, no archive), save as bookmark
+    // 4. Text-only tweet: bookmark fallback
     if (savedCount === 0) {
       try {
-        const bmResp = await fetch(`${EAGLE_API}/api/item/addBookmark`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: tweet.url,
-            name: `@${tweet.username}_${tweet.id}`,
-            tags,
-            annotation,
-            folderId: folderId || undefined,
-          }),
+        const r = await eagleFetch("/api/item/addBookmark", {
+          url: tweet.url,
+          name: `@${tweet.username}_${tweet.id}`,
+          tags,
+          annotation,
+          folderId: folderId || undefined,
         });
-        if (!bmResp.ok) throw new Error(`HTTP ${bmResp.status}`);
-        const bmJson = await bmResp.json();
-        if (bmJson.status === "success") savedCount++;
+        if (r.status === "success") savedCount++;
       } catch (err) {
         console.warn("[Tweet Saver] Eagle bookmark save failed:", err);
       }
@@ -220,6 +229,16 @@ async function saveToEagle(data, folderId) {
   } catch (err) {
     return { success: false, error: err.message };
   }
+}
+
+async function eagleFetch(endpoint, body) {
+  const resp = await fetch(EAGLE_API + endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json();
 }
 
 function getExt(url) {
