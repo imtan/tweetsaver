@@ -2,7 +2,20 @@
 // to intercept fetch() responses from Twitter's internal API and extract video URLs.
 
 (() => {
-  const videoMap = {}; // tweetId -> { mp4Url, bitrate, contentType }
+  const videoMap = {}; // tweetId -> { mp4Url, bitrate, allVariants }
+
+  // Twitter API endpoints that contain tweet (and thus video) data
+  function isTweetApiUrl(url) {
+    return (
+      url.includes("/graphql/") ||
+      url.includes("/2/timeline/") ||
+      url.includes("/TweetDetail") ||
+      url.includes("/HomeTimeline") ||
+      url.includes("/UserTweets") ||
+      url.includes("/SearchTimeline") ||
+      url.includes("/ListLatestTweets")
+    );
+  }
 
   // Extract video info from Twitter API response data recursively
   function extractVideos(obj, depth = 0) {
@@ -31,12 +44,6 @@
           })
         );
       }
-    }
-
-    // Also check for the newer GraphQL response format
-    // where video info is nested inside media entities
-    if (obj.media_key && obj.video_info) {
-      // handled above
     }
 
     // Check for legacy tweet format (inside result.legacy)
@@ -85,18 +92,10 @@
     const response = await originalFetch.apply(this, args);
 
     try {
-      const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+      const url =
+        typeof args[0] === "string" ? args[0] : args[0]?.url || String(args[0] || "");
 
-      // Only intercept Twitter API endpoints that contain tweet data
-      if (
-        url.includes("/graphql/") ||
-        url.includes("/2/timeline/") ||
-        url.includes("/TweetDetail") ||
-        url.includes("/HomeTimeline") ||
-        url.includes("/UserTweets") ||
-        url.includes("/SearchTimeline") ||
-        url.includes("/ListLatestTweets")
-      ) {
+      if (isTweetApiUrl(url)) {
         // Clone to avoid consuming the body
         const clone = response.clone();
         clone.json().then((json) => {
@@ -122,15 +121,15 @@
   XMLHttpRequest.prototype.send = function (...args) {
     this.addEventListener("load", function () {
       try {
-        const url = this.__tsUrl || "";
-        if (
-          url.includes("/graphql/") ||
-          url.includes("/2/timeline/") ||
-          url.includes("/TweetDetail")
-        ) {
-          const json = JSON.parse(this.responseText);
-          extractVideos(json);
+        const url = this.__tsUrl ? String(this.__tsUrl) : "";
+        if (!isTweetApiUrl(url)) return;
+        let json = null;
+        if (this.responseType === "json") {
+          json = this.response;
+        } else if (this.responseType === "" || this.responseType === "text") {
+          json = JSON.parse(this.responseText);
         }
+        if (json) extractVideos(json);
       } catch {}
     });
     return origSend.apply(this, args);

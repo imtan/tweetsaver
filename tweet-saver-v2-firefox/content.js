@@ -33,6 +33,27 @@
     }
   });
 
+  // Ask the interceptor for a tweet's video data and wait briefly for the answer
+  function requestVideoData(tweetId, timeoutMs = 500) {
+    if (videoUrlMap.has(tweetId)) return Promise.resolve(videoUrlMap.get(tweetId));
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        window.removeEventListener("__tweetsaver_video_response", onResponse);
+        resolve(videoUrlMap.get(tweetId) || null);
+      }, timeoutMs);
+      function onResponse(e) {
+        if (e.detail?.tweetId !== tweetId) return;
+        clearTimeout(timer);
+        window.removeEventListener("__tweetsaver_video_response", onResponse);
+        resolve(e.detail.data);
+      }
+      window.addEventListener("__tweetsaver_video_response", onResponse);
+      window.dispatchEvent(
+        new CustomEvent("__tweetsaver_query_video", { detail: { tweetId } })
+      );
+    });
+  }
+
   // Inject the interceptor script into the page context
   function injectInterceptor() {
     const script = document.createElement("script");
@@ -46,15 +67,18 @@
   let shortcut = { altKey: true, ctrlKey: false, shiftKey: false, metaKey: false, key: "s" };
 
   function loadShortcut() {
-    api.storage.local.get(["shortcut"], (data) => {
-      if (data.shortcut) shortcut = data.shortcut;
-      updateAllTooltips();
-    });
+    // Promise style works in both Chrome MV3 and Firefox (Firefox rejects callbacks on browser.*)
+    Promise.resolve(api.storage.local.get("shortcut"))
+      .then((data) => {
+        if (data && data.shortcut) shortcut = data.shortcut;
+        updateAllTooltips();
+      })
+      .catch(() => {});
   }
 
   // Listen for changes from popup
-  api.storage.onChanged.addListener((changes) => {
-    if (changes.shortcut) {
+  api.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.shortcut) {
       shortcut = changes.shortcut.newValue;
       updateAllTooltips();
     }
@@ -91,7 +115,11 @@
     document.querySelectorAll(".tweet-saver-toast").forEach((el) => el.remove());
     const t = document.createElement("div");
     t.className = "tweet-saver-toast" + (isError ? " tweet-saver-toast-error" : "");
-    t.innerHTML = `<span>${isError ? "✕" : "✓"}</span><span>${msg}</span>`;
+    const icon = document.createElement("span");
+    icon.textContent = isError ? "✕" : "✓";
+    const text = document.createElement("span");
+    text.textContent = msg;
+    t.append(icon, text);
     document.body.appendChild(t);
     requestAnimationFrame(() => t.classList.add("tweet-saver-toast-visible"));
     setTimeout(() => {
@@ -161,23 +189,11 @@
       }
     }
 
-    // Video detection + URL from interceptor
+    // Video detection — URL is resolved asynchronously in saveTweet()
     if (article.querySelector("video")) {
       data.hasVideo = true;
       if (data.id && videoUrlMap.has(data.id)) {
-        const vData = videoUrlMap.get(data.id);
-        data.videoUrls.push(vData.mp4Url);
-      } else if (data.id) {
-        // Try querying the interceptor
-        window.dispatchEvent(
-          new CustomEvent("__tweetsaver_query_video", {
-            detail: { tweetId: data.id },
-          })
-        );
-        // Check again after a tick
-        if (videoUrlMap.has(data.id)) {
-          data.videoUrls.push(videoUrlMap.get(data.id).mp4Url);
-        }
+        data.videoUrls.push(videoUrlMap.get(data.id).mp4Url);
       }
     }
 
@@ -422,16 +438,20 @@
     btn.innerHTML = SPIN_ICON;
 
     try {
+      // The interceptor may not have answered yet when extractTweet ran
+      if (tweet.hasVideo && tweet.videoUrls.length === 0 && tweet.id) {
+        const vData = await requestVideoData(tweet.id);
+        if (vData && vData.mp4Url) tweet.videoUrls.push(vData.mp4Url);
+      }
+
       const tweetImages = [];
       for (const url of tweet.imageUrls) {
         try { tweetImages.push(await loadImage(url)); } catch { tweetImages.push(null); }
       }
 
       const archiveDataUrl = await renderArchiveImage(tweet, tweetImages);
-      // Extract base64 from data URL (for Eagle)
-      const archiveBase64 = archiveDataUrl.split(",")[1];
 
-      // Send unified payload to background
+      // Send unified payload to background (Eagle base64 is derived there)
       const resp = await api.runtime.sendMessage({
         type: "saveTweet",
         data: {
@@ -442,12 +462,9 @@
             hasVideo: tweet.hasVideo,
             savedAt: new Date().toISOString(),
           },
-          // For Downloads
           archivePngDataUrl: archiveDataUrl,
           imageUrls: tweet.imageUrls,
           videoUrls: tweet.videoUrls,
-          // For Eagle
-          archivePngBase64: archiveBase64,
         },
       });
 
@@ -472,13 +489,6 @@
       showToast(err.message, true);
       console.error("[Tweet Saver]", err);
     }
-  }
-
-  function getExt(url) {
-    try {
-      const m = url.match(/format=(\w+)/); if (m) return m[1];
-      const p = new URL(url).pathname.match(/\.(\w+)$/); if (p) return p[1];
-    } catch {} return "jpg";
   }
 
   // ── Inject buttons ──
@@ -518,6 +528,17 @@
 
   // ── Keyboard shortcut (configurable) ──
   document.addEventListener("keydown", (e) => {
+    if (!e.key) return;
+    // Don't fire while typing (tweet composer, search box, DMs, ...)
+    const target = e.target;
+    if (
+      target &&
+      (target.isContentEditable ||
+        ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+    ) {
+      return;
+    }
+
     // Match configured shortcut
     const keyMatch = e.key.toLowerCase() === shortcut.key.toLowerCase();
     const modMatch =
@@ -544,8 +565,16 @@
   });
 
   // ── Observer ──
-  const obs = new MutationObserver(() => requestAnimationFrame(processAll));
+  let scanQueued = false;
+  const obs = new MutationObserver(() => {
+    if (scanQueued) return;
+    scanQueued = true;
+    requestAnimationFrame(() => {
+      scanQueued = false;
+      processAll();
+    });
+  });
   obs.observe(document.body, { childList: true, subtree: true });
   processAll();
-  console.log("[Tweet Saver v2.1] Loaded ✓");
+  console.log(`[Tweet Saver v${api.runtime.getManifest().version}] Loaded ✓`);
 })();

@@ -15,7 +15,8 @@ let recording = false;
 let eagleFolders = [];
 
 // ── Load saved settings ──
-api.storage.local.get(["saveMode", "eagleFolderId", "shortcut"], (data) => {
+// Promise style works in both Chrome MV3 and Firefox (Firefox rejects callbacks on browser.*)
+Promise.resolve(api.storage.local.get(["saveMode", "eagleFolderId", "shortcut"])).then((data) => {
   if (data.saveMode) {
     currentMode = data.saveMode;
   }
@@ -106,7 +107,7 @@ function flattenFolders(folders, depth = 0) {
 }
 
 // ── Shortcut recorder ──
-function renderShortcut(sc) {
+function shortcutParts(sc) {
   const parts = [];
   if (sc.ctrlKey) parts.push("Ctrl");
   if (sc.altKey) parts.push("Alt");
@@ -116,11 +117,17 @@ function renderShortcut(sc) {
   if (k === " ") k = "Space";
   else if (k.length === 1) k = k.toUpperCase();
   parts.push(k);
-  return parts.map((p) => `<kbd>${p}</kbd>`).join(" + ");
+  return parts;
 }
 
 function updateShortcutDisplay() {
-  shortcutBox.innerHTML = renderShortcut(currentShortcut);
+  shortcutBox.innerHTML = "";
+  shortcutParts(currentShortcut).forEach((p, i) => {
+    if (i > 0) shortcutBox.appendChild(document.createTextNode(" + "));
+    const kbd = document.createElement("kbd");
+    kbd.textContent = p;
+    shortcutBox.appendChild(kbd);
+  });
   shortcutBox.classList.remove("recording");
 }
 
@@ -159,14 +166,17 @@ document.addEventListener("click", (e) => {
 });
 
 // ── Save settings ──
-saveBtn.addEventListener("click", () => {
+saveBtn.addEventListener("click", async () => {
   const settings = {
     saveMode: currentMode,
     shortcut: currentShortcut,
     eagleFolderId: eagleFolderSelect.value || "",
   };
-  api.storage.local.set(settings, () => {
+  try {
+    await api.storage.local.set(settings);
     statusMsg.textContent = "保存しました ✓";
-    setTimeout(() => (statusMsg.textContent = ""), 2000);
-  });
+  } catch (err) {
+    statusMsg.textContent = `保存に失敗: ${err.message}`;
+  }
+  setTimeout(() => (statusMsg.textContent = ""), 2000);
 });
