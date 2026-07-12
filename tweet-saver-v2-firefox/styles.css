@@ -1,0 +1,119 @@
+/* Tweet Saver v2 - Injected Styles */
+
+.tweet-saver-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9999px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+  color: rgb(113, 118, 123);
+  padding: 0;
+  position: relative;
+}
+
+.tweet-saver-btn:hover {
+  background-color: rgba(29, 155, 240, 0.1);
+  color: rgb(29, 155, 240);
+}
+
+.tweet-saver-btn:hover .tweet-saver-icon {
+  color: rgb(29, 155, 240);
+}
+
+.tweet-saver-btn.tweet-saver-saved {
+  color: rgb(0, 186, 124);
+}
+
+.tweet-saver-btn.tweet-saver-saved:hover {
+  background-color: rgba(0, 186, 124, 0.1);
+}
+
+.tweet-saver-btn.tweet-saver-saving {
+  pointer-events: none;
+}
+
+.tweet-saver-page-btn {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 99999;
+  background: rgb(29, 155, 240);
+  color: #fff;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+}
+
+.tweet-saver-page-btn:hover {
+  background: rgb(26, 140, 216);
+  color: #fff;
+}
+
+.tweet-saver-icon {
+  width: 18px;
+  height: 18px;
+  transition: color 0.2s;
+}
+
+.tweet-saver-btn::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  margin-bottom: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.tweet-saver-btn:hover::after { opacity: 1; }
+
+/* Toast */
+.tweet-saver-toast {
+  position: fixed;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: #1d1d1d;
+  color: #fff;
+  padding: 12px 20px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  z-index: 99999;
+  opacity: 0;
+  transition: opacity 0.3s, transform 0.3s;
+  pointer-events: none;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  backdrop-filter: blur(8px);
+  max-width: 400px;
+}
+
+.tweet-saver-toast.tweet-saver-toast-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.tweet-saver-toast.tweet-saver-toast-error { background: #c0392b; }
+
+@keyframes tweet-saver-spin {
+  to { transform: rotate(360deg); }
+}
+
+.tweet-saver-btn.tweet-saver-saving .tweet-saver-icon {
+  animation: tweet-saver-spin 0.8s linear infinite;
+}
