@@ -42,15 +42,6 @@
     storeArticleData(e.detail?.tweetId, e.detail?.data);
   });
 
-  // Inject the interceptor script into the page context
-  function injectInterceptor() {
-    const script = document.createElement("script");
-    script.src = api.runtime.getURL("interceptor.js");
-    script.onload = () => script.remove();
-    (document.head || document.documentElement).appendChild(script);
-  }
-  injectInterceptor();
-
   // ── Shortcut config ──
   let shortcut = { altKey: true, ctrlKey: false, shiftKey: false, metaKey: false, key: "s" };
 
@@ -100,7 +91,11 @@
     document.querySelectorAll(".tweet-saver-toast").forEach((el) => el.remove());
     const t = document.createElement("div");
     t.className = "tweet-saver-toast" + (isError ? " tweet-saver-toast-error" : "");
-    t.innerHTML = `<span>${isError ? "✕" : "✓"}</span><span>${msg}</span>`;
+    const icon = document.createElement("span");
+    icon.textContent = isError ? "✕" : "✓";
+    const text = document.createElement("span");
+    text.textContent = msg;
+    t.append(icon, text);
     document.body.appendChild(t);
     requestAnimationFrame(() => t.classList.add("tweet-saver-toast-visible"));
     setTimeout(() => {
@@ -679,7 +674,7 @@
   function fmtTime(iso) {
     if (!iso) return "";
     try {
-      return new Date(iso).toLocaleString("en-US", {
+      return new Date(iso).toLocaleString(undefined, {
         hour: "numeric", minute: "2-digit", hour12: true,
         month: "short", day: "numeric", year: "numeric",
       });
@@ -825,9 +820,6 @@
 
       const archiveDataUrl = await renderArchiveImage(tweet, tweetImages, extra);
       const articleDataUrl = tweet.article ? await renderArticleImage(tweet.article, tweet) : "";
-      // Extract base64 from data URL (for Eagle)
-      const archiveBase64 = archiveDataUrl.split(",")[1];
-      const articleBase64 = articleDataUrl ? articleDataUrl.split(",")[1] : "";
 
       // Send unified payload to background
       const resp = await api.runtime.sendMessage({
@@ -850,9 +842,6 @@
           cardImageUrl: tweet.card ? tweet.card.imageUrl : "",
           articleImageUrls: tweet.article ? (tweet.article.imageUrls || []) : [],
           articleMarkdown: tweet.article ? articleMarkdown(tweet.article, tweet) : "",
-          // For Eagle
-          archivePngBase64: archiveBase64,
-          articlePngBase64: articleBase64,
         },
       });
 
@@ -867,7 +856,8 @@
         const parts = [];
         if (resp.download?.success) parts.push("📁");
         if (resp.eagle?.success) parts.push(`🦅(${resp.eagle.itemCount})`);
-        showToast(`@${tweet.username} — ${parts.join(" + ") || "saved"}`);
+        const failed = resp.download?.failed ? `（${resp.download.failed}件失敗）` : "";
+        showToast(`@${tweet.username} — ${parts.join(" + ") || "saved"}${failed}`);
       } else {
         throw new Error(resp?.error || "Save failed");
       }
@@ -938,6 +928,8 @@
 
   // ── Keyboard shortcut (configurable) ──
   document.addEventListener("keydown", (e) => {
+    if (e.target.matches?.("input, textarea, select") || e.target.isContentEditable) return;
+
     // Match configured shortcut
     const keyMatch = e.key.toLowerCase() === shortcut.key.toLowerCase();
     const modMatch =

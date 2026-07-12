@@ -4,6 +4,7 @@ const EAGLE_API = "http://localhost:41595";
 
 // ── Convert data URL to Blob URL (Firefox can't download data: URLs) ──
 function dataUrlToBlobUrl(dataUrl) {
+  if (typeof URL.createObjectURL !== "function") return dataUrl;
   const parts = dataUrl.split(",");
   const mime = parts[0].match(/:(.*?);/)[1];
   const raw = atob(parts[1]);
@@ -14,41 +15,38 @@ function dataUrlToBlobUrl(dataUrl) {
 }
 
 // ── Start download and wait for completion ──
-function downloadAndWait(url, filename) {
+async function downloadAndWait(url, filename, timeoutMs = 60000) {
+  const downloadId = await api.downloads.download({ url, filename, saveAs: false });
   return new Promise((resolve, reject) => {
-    api.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
-      if (api.runtime.lastError || !downloadId) {
-        return reject(new Error(api.runtime.lastError?.message || "Download start failed"));
-      }
+    const timeout = setTimeout(() => {
+      api.downloads.onChanged.removeListener(listener);
+      // Cancel, or the timed-out download keeps running while the next variant starts
+      api.downloads.cancel(downloadId).catch(() => {});
+      reject(new Error("Download timeout"));
+    }, timeoutMs);
 
-      const timeout = setTimeout(() => {
+    function listener(delta) {
+      if (delta.id !== downloadId) return;
+      if (delta.state && delta.state.current === "complete") {
+        clearTimeout(timeout);
         api.downloads.onChanged.removeListener(listener);
-        reject(new Error("Download timeout"));
-      }, 60000);
-
-      function listener(delta) {
-        if (delta.id !== downloadId) return;
-        if (delta.state && delta.state.current === "complete") {
-          clearTimeout(timeout);
-          api.downloads.onChanged.removeListener(listener);
-          resolve();
-        }
-        if (delta.state && delta.state.current === "interrupted") {
-          clearTimeout(timeout);
-          api.downloads.onChanged.removeListener(listener);
-          reject(new Error("Download interrupted"));
-        }
+        resolve();
       }
-      api.downloads.onChanged.addListener(listener);
-    });
+      if (delta.state && delta.state.current === "interrupted") {
+        clearTimeout(timeout);
+        api.downloads.onChanged.removeListener(listener);
+        reject(new Error("Download interrupted"));
+      }
+    }
+    api.downloads.onChanged.addListener(listener);
   });
 }
 
-async function downloadFirst(urls, filename) {
+async function downloadFirst(urls, filename, timeoutMs) {
   const errors = [];
   for (const url of urls.filter(Boolean)) {
     try {
-      await downloadAndWait(url, filename);
+      await downloadAndWait(url, filename, timeoutMs);
       return;
     } catch (err) {
       errors.push(err.message);
@@ -68,34 +66,38 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function handleSave(data) {
-  const settings = await api.storage.local.get(["saveMode", "eagleFolderId"]);
-  const mode = settings.saveMode || "download";
+  // Chrome MV3: the service worker is killed after 30s without extension-API activity,
+  // and downloads.onChanged stays silent during a long transfer. Ping to stay alive.
+  const keepAlive = setInterval(() => api.runtime.getPlatformInfo(), 20000);
+  try {
+    const settings = await api.storage.local.get(["saveMode", "eagleFolderId"]);
+    const mode = settings.saveMode || "download";
 
-  // Step 1: Always download files first
-  const dlResult = await saveToDownloads(data);
+    const results = { download: null, eagle: null };
 
-  if (!dlResult.success) {
-    return { success: false, error: "Download failed: " + dlResult.error };
+    if (mode === "download" || mode === "both") {
+      results.download = await saveToDownloads(data);
+    }
+
+    if (mode === "eagle" || mode === "both") {
+      results.eagle = await sendToEagle(data, settings.eagleFolderId);
+    }
+
+    const anySuccess =
+      (results.download && results.download.success) ||
+      (results.eagle && results.eagle.success);
+
+    if (!anySuccess) {
+      const errors = [];
+      if (results.download && !results.download.success) errors.push("DL: " + results.download.error);
+      if (results.eagle && !results.eagle.success) errors.push("Eagle: " + results.eagle.error);
+      return { success: false, error: errors.join("; ") };
+    }
+
+    return { success: true, mode, download: results.download, eagle: results.eagle };
+  } finally {
+    clearInterval(keepAlive);
   }
-
-  const results = { download: dlResult, eagle: null };
-
-  // Step 2: If Eagle mode, send to Eagle via addFromURL
-  if (mode === "eagle" || mode === "both") {
-    results.eagle = await sendToEagle(data, settings.eagleFolderId);
-  }
-
-  const anySuccess =
-    results.download.success || (results.eagle && results.eagle.success);
-
-  if (!anySuccess) {
-    const errors = [];
-    if (!results.download.success) errors.push("DL: " + results.download.error);
-    if (results.eagle && !results.eagle.success) errors.push("Eagle: " + results.eagle.error);
-    return { success: false, error: errors.join("; ") };
-  }
-
-  return { success: true, mode, download: results.download, eagle: results.eagle };
 }
 
 // ── Download all files ──
@@ -105,24 +107,27 @@ async function saveToDownloads(data) {
   try {
     const { tweet, archivePngDataUrl, articlePngDataUrl, imageUrls, videoUrls, quoteImageUrls, cardImageUrl, articleImageUrls, articleMarkdown } = data;
     const folder = `tweets/${tweet.username}_${tweet.id}`;
+    let failed = 0;
 
     // Archive PNG
     if (archivePngDataUrl) {
       const blobUrl = dataUrlToBlobUrl(archivePngDataUrl);
-      blobUrls.push(blobUrl);
+      if (blobUrl !== archivePngDataUrl) blobUrls.push(blobUrl);
       try {
         await downloadAndWait(blobUrl, `${folder}/archive.png`);
       } catch (err) {
+        failed++;
         console.warn("[Tweet Saver] Archive DL failed:", err);
       }
     }
 
     if (articlePngDataUrl) {
       const blobUrl = dataUrlToBlobUrl(articlePngDataUrl);
-      blobUrls.push(blobUrl);
+      if (blobUrl !== articlePngDataUrl) blobUrls.push(blobUrl);
       try {
         await downloadAndWait(blobUrl, `${folder}/article.png`);
       } catch (err) {
+        failed++;
         console.warn("[Tweet Saver] Article PNG DL failed:", err);
       }
     }
@@ -131,25 +136,29 @@ async function saveToDownloads(data) {
     const jsonStr = JSON.stringify(tweet, null, 2);
     const jsonDataUrl = "data:application/json;base64," + btoa(unescape(encodeURIComponent(jsonStr)));
     const jsonBlobUrl = dataUrlToBlobUrl(jsonDataUrl);
-    blobUrls.push(jsonBlobUrl);
+    if (jsonBlobUrl !== jsonDataUrl) blobUrls.push(jsonBlobUrl);
     try {
       await downloadAndWait(jsonBlobUrl, `${folder}/tweet.json`);
-    } catch {}
+    } catch { failed++; }
 
     // Images
     for (let i = 0; i < (imageUrls || []).length; i++) {
       try {
         const ext = getExt(imageUrls[i]);
         await downloadAndWait(imageUrls[i], `${folder}/image_${i + 1}.${ext}`);
-      } catch {}
+      } catch { failed++; }
     }
 
     // Videos: try all MP4 variants, but save only one successful file.
+    // 10min per variant — large videos regularly exceed 60s.
+    // Failure is counted, not fatal: hasVideo can be true with no captured URL
+    // (quoted-tweet video, interceptor miss), and the rest of the save is already on disk.
     if (tweet.hasVideo) {
       try {
-        await downloadFirst(videoUrls || [], `${folder}/video_1.mp4`);
+        await downloadFirst(videoUrls || [], `${folder}/video_1.mp4`, 600000);
       } catch (err) {
-        return { success: false, error: "Video download failed: " + err.message };
+        failed++;
+        console.warn("[Tweet Saver] Video DL failed:", err);
       }
     }
 
@@ -158,7 +167,7 @@ async function saveToDownloads(data) {
       try {
         const ext = getExt(quoteImageUrls[i]);
         await downloadAndWait(quoteImageUrls[i], `${folder}/quote_image_${i + 1}.${ext}`);
-      } catch {}
+      } catch { failed++; }
     }
 
     // Link card / article thumbnail (記事のサムネイル)
@@ -166,16 +175,16 @@ async function saveToDownloads(data) {
       try {
         const ext = getExt(cardImageUrl);
         await downloadAndWait(cardImageUrl, `${folder}/card_image.${ext}`);
-      } catch {}
+      } catch { failed++; }
     }
 
     if (articleMarkdown) {
       const mdDataUrl = "data:text/markdown;base64," + btoa(unescape(encodeURIComponent(articleMarkdown)));
       const mdBlobUrl = dataUrlToBlobUrl(mdDataUrl);
-      blobUrls.push(mdBlobUrl);
+      if (mdBlobUrl !== mdDataUrl) blobUrls.push(mdBlobUrl);
       try {
         await downloadAndWait(mdBlobUrl, `${folder}/article.md`);
-      } catch {}
+      } catch { failed++; }
     }
 
     const seenImages = new Set([...(imageUrls || []), ...(quoteImageUrls || []), cardImageUrl].filter(Boolean));
@@ -186,10 +195,10 @@ async function saveToDownloads(data) {
       try {
         const ext = getExt(articleImageUrls[i]);
         await downloadAndWait(articleImageUrls[i], `${folder}/article_image_${articleImageIndex++}.${ext}`);
-      } catch {}
+      } catch { failed++; }
     }
 
-    return { success: true, folder };
+    return { success: true, folder, failed };
   } catch (err) {
     return { success: false, error: err.message };
   } finally {
@@ -200,7 +209,9 @@ async function saveToDownloads(data) {
 // ── Send to Eagle via addFromURL (same approach as Chrome version) ──
 async function sendToEagle(data, folderId) {
   try {
-    const { tweet, archivePngBase64, articlePngBase64, imageUrls, videoUrls } = data;
+    const { tweet, imageUrls, videoUrls } = data;
+    const archivePngBase64 = data.archivePngDataUrl.split(",")[1];
+    const articlePngBase64 = data.articlePngDataUrl.split(",")[1];
 
     const tags = ["tweet", `@${tweet.username}`];
     if (tweet.hasVideo) tags.push("video");
@@ -365,6 +376,7 @@ async function eagleFetch(endpoint, body) {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return await resp.json();

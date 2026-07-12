@@ -13,33 +13,37 @@ X (Twitter) のツイートをワンキーで保存するブラウザ拡張機�
   - `tweet.json` — ツイートのテキスト・ユーザー情報・URL など
   - `image_1.jpg` … — 添付画像
   - `video_1.mp4` … — 動画（mp4）
+- X Article（長文記事）を記事ページ右下のフローティングボタンまたはショートカットで保存
+  - `article.png` — 記事のレンダリング画像
+  - `article.md` — Markdown 化した本文
+  - `article_image_N` — 記事内画像
 - 保存先は Downloads / Eagle / 両方 から選択可能
 - Eagle 使用時はフォルダを指定可能
 - ショートカットキーはポップアップから自由にカスタマイズ可能
+- 保存済みチェック（✓）はタブ内セッション限りで、ページを再読み込みするとリセット
 
 ## 対応ブラウザ
 
 | フォルダ | 対象 |
 |---|---|
-| `tweet-saver-v2/` | Chrome / Edge |
-| `tweet-saver-v2-firefox/` | Firefox |
+| `tweet-saver/` | Chrome / Edge / Firefox 128 以上 |
 
 ## インストール方法
 
 ### Chrome / Edge
 
-1. `tweet-saver-v2/` フォルダをダウンロード（またはリポジトリをクローン）
+1. `tweet-saver/` フォルダをダウンロード（またはリポジトリをクローン）
 2. Chrome で `chrome://extensions` を開く
 3. 右上の「デベロッパーモード」をオンにする
 4. 「パッケージ化されていない拡張機能を読み込む」をクリック
-5. `tweet-saver-v2/` フォルダを選択
+5. `tweet-saver/` フォルダを選択
 
 ### Firefox
 
-1. `tweet-saver-v2-firefox/` フォルダをダウンロード
+1. Firefox 128 以上を使用し、`tweet-saver/` フォルダをダウンロード
 2. Firefox で `about:debugging#/runtime/this-firefox` を開く
 3. 「一時的なアドオンを読み込む」をクリック
-4. `tweet-saver-v2-firefox/manifest.json` を選択
+4. `tweet-saver/manifest.json` を選択
 
 ## 使い方
 
@@ -80,7 +84,6 @@ Downloads/
 |---|---|
 | `downloads` | ファイルをダウンロードフォルダに保存 |
 | `storage` | 設定（保存先・ショートカット）を記憶 |
-| `activeTab` | 現在のタブの情報を取得 |
 | `x.com`, `twitter.com` | ツイートページで動作するため |
 | `localhost:41595` | Eagle API との通信 |
 
